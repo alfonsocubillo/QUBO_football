@@ -1,0 +1,36 @@
+```mermaid
+flowchart TD
+    A["Start run()"] --> B["validate_input_data_keys(input_data)"]
+    B --> C["validate_solver_params(solver_params)"]
+    C --> D["get_with_default for each knob: sampler, num_reads_sa, num_sweeps_sa, num_restarts_tabu, tenure, timeout_tabu, seed, penalty_scale, repair_solution, generate_plots"]
+    D --> E["save_input_snapshot -> additional_output/input_used.json"]
+    E --> F["load_problem_data: NC, NT, budgets, bounds, per-player stats, p_pref"]
+    F --> G["check_input_feasibility (data cross-checks, warnings/errors)"]
+    G --> H["build_eligibility: E_i from p_pref + secondary positions; R_k reference groups"]
+    H --> I["compute_per90_stats z_i,m (rating as-is)"]
+    I --> J["compute_percentiles phi_i,k,m (mid-rank within R_k)"]
+    J --> K["compute_quality: q_perf, q_pot, Q_i,k (eq. objective coefficients)"]
+    K --> L["build_variables: one binary per eligible (i,k) pair"]
+    L --> M["build_qubo: -F(x) + penalties C1..C9 with binary slacks"]
+    M --> N{"sampler setting"}
+    N -- "sa or both" --> O["neal.SimulatedAnnealingSampler.sample(bqm, num_reads, num_sweeps, seed)"]
+    N -- "tabu or both" --> P["tabu.TabuSampler.sample(bqm, num_restarts, tenure, timeout, seed)"]
+    O --> Q["merge samplesets, sort by energy"]
+    P --> Q
+    Q --> R["scan samples: decode x, verify_constraints C1-C10"]
+    R --> S{"any feasible sample?"}
+    S -- no --> T{"repair_solution?"}
+    T -- yes --> U["greedy_repair: rebuild squad respecting C1-C9 from best sample"]
+    U --> V{"repair feasible?"}
+    V -- no --> W["Raise RuntimeError: no valid squad exists"]
+    T -- no --> W
+    S -- yes --> X["Select best feasible assignment"]
+    V -- yes --> X
+    X --> Y["compute_outputs: F, A, D, N_set, k_i, n_k, n_new_k, money, F_x, Q_bar, Gamma, Gamma_pct"]
+    Y --> Z["compute_baseline Q0_bar, Q0_bar_k, B0_set (initial squad rule violations)"]
+    Z --> AA{"generate_plots?"}
+    AA -- yes --> AB["Save assets: squad_composition.png, quality_breakdown.png, energy_distribution.png, qubo_matrix.png, budget_usage.png, metadata.json"]
+    AA -- no --> AC["Return schema-compliant result dict"]
+    AB --> AC
+    AC --> AD["End run()"]
+```

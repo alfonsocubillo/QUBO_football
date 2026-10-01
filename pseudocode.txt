@@ -1,0 +1,102 @@
+QCentroid Football Team Creator — QUBO + Tabu/Simulated Annealing — Pseudocode
+================================================================================
+
+FUNCTION run(input_data, solver_params, extra_arguments):
+
+    # 1. Guard against silent misconfiguration
+    validate_input_data_keys(input_data)          # reject unknown data keys
+    validate_solver_params(solver_params)         # reject unknown knobs
+
+    # 2. Resolve solver params (every omitted key is logged)
+    sampler_choice      <- get_with_default(solver_params, "sampler", "both")
+    num_reads_sa        <- get_with_default(solver_params, "num_reads_sa", 400)
+    num_sweeps_sa       <- get_with_default(solver_params, "num_sweeps_sa", 3000)
+    num_restarts_tabu   <- get_with_default(solver_params, "num_restarts_tabu", 50)
+    tenure              <- get_with_default(solver_params, "tenure", None)
+    timeout_tabu        <- get_with_default(solver_params, "timeout_tabu", 5000)
+    seed                <- get_with_default(solver_params, "seed", 42)
+    penalty_scale       <- get_with_default(solver_params, "penalty_scale", 2.0)
+    repair_solution     <- get_with_default(solver_params, "repair_solution", True)
+    generate_plots      <- get_with_default(solver_params, "generate_plots", True)
+
+    # 3. Traceability snapshot (always, never gated)
+    MAKE DIR additional_output
+    WRITE additional_output/input_used.json <- {data: input_data, solver_params: solver_params}
+
+    # 4. Load the instance (sets C, T, P, K; all parameters of the model)
+    prob <- load_problem_data(input_data)
+    check_input_feasibility(prob)                 # sum L_k <= N <= sum U_k, etc.
+
+    # 5. Pre-processing (all constant, done once, outside the optimization)
+    E_i, R_k  <- build_eligibility(p_pref)        # eligible positions + reference groups
+    z[i][m]   <- compute_per90_stats(...)         # z = 90*y/mu ; rating as-is
+    phi       <- compute_percentiles(z, R_k, M_k) # mid-rank percentile in R_k
+    q_perf    <- mean over m in M_k of phi[i][k][m]
+    q_pot     <- 100 * clip((A_lo - a_i)/(A_lo - A_hi), 0, 1)
+    Q[i][k]   <- alpha*q_perf[i][k] + (1-alpha)*q_pot[i]
+
+    # 6. Variables: one binary per eligible (i,k) pair; u_i is derived, not a variable
+    var_index <- build_variables(E_i)
+
+    # 7. QUBO construction (penalty reformulation of C1..C9)
+    bqm, slack_info, Q_matrix <- build_qubo(Q, prob, var_index, penalty_scale)
+        objective      : -sum_i sum_k Q[i][k] x[i,k]
+        lambda1 * C1   : (sum_k x[i,k])(sum_k x[i,k] - 1)       per player
+        lambda2 * C3   : (sum x - N)^2                          exact squad size
+        lambda3 * C2   : (sum w_i x + sigma_W - W_max)^2        salary (binary slack)
+        lambda4 * C6   : (fees + values + sigma_B - B_avail)^2  transfer budget
+        lambda5 * C4/C5: (sum_{R_k} x[i,k] - L_k - sigma_k)^2   with sigma_k <= U_k - L_k
+        lambda6 * C7   : (new signings at k - rho_k - sigma)^2  priority positions
+        lambda7 * C8   : (signings + sigma - Sigma_max)^2
+        lambda8 * C9   : (retained - sigma - NC + Delta_max)^2
+
+    # 8. Sample the QUBO (quantum-inspired, local)
+    samples <- []
+    IF sampler_choice in {"sa", "both"}:
+        samples += neal.SimulatedAnnealingSampler().sample(bqm, num_reads=num_reads_sa,
+                                                           num_sweeps=num_sweeps_sa, seed=seed)
+    IF sampler_choice in {"tabu", "both"}:
+        samples += tabu.TabuSampler().sample(bqm, num_restarts=num_restarts_tabu,
+                                             tenure=tenure, timeout=timeout_tabu, seed=seed)
+    IF samples is empty: RAISE RuntimeError
+
+    # 9. Decode and verify (C1-C10 recomputed independently from x*)
+    FOR each sample in samples sorted by ascending energy:
+        assign <- decode_sample(sample, var_index)
+        report <- verify_constraints(assign, prob)
+        IF all checks pass: best_assign <- assign ; BREAK
+
+    IF no feasible sample found:
+        IF repair_solution:
+            best_assign <- greedy_repair(best energy sample, Q, prob)
+            IF repair fails: RAISE RuntimeError("no valid squad exists ...")
+        ELSE:
+            RAISE RuntimeError("no valid squad exists ...")
+
+    # 10. Output assembly (all Output Data fields of the formulation)
+    outputs <- compute_outputs(best_assign, Q, q_perf, q_pot, prob)
+        F, A, D, N_set, k_i, q_perf list, q_pot list, Q list
+        n_k, n_new_k, n_sign, n_sale
+        R_sale, B_avail, C_spend, B_rem, W_tot, W_rem
+        F_x (benchmark), Q_bar (benchmark), Q_bar_k
+        q_perf_bar, q_pot_bar
+    baseline <- compute_baseline(Q, prob)         # Q0_bar, Q0_bar_k, B0_set
+    Gamma      <- Q_bar - Q0_bar                  # benchmark
+    Gamma_pct  <- 100 * Gamma / Q0_bar            # benchmark
+
+    # 11. Optional assets
+    IF generate_plots:
+        save_squad_composition_plot()    -> squad_composition.png
+        save_quality_breakdown_plot()    -> quality_breakdown.png
+        save_energy_distribution_plot()  -> energy_distribution.png
+        save_qubo_matrix_plot()          -> qubo_matrix.png
+        save_budget_usage_plot()         -> budget_usage.png
+    ALWAYS (when plots on) save_metadata_json()   -> metadata.json
+
+    # 12. Return exactly the registered output schema (JSON-native types only)
+    RETURN { F, A, D, N_set, k_i, q_perf, q_pot, Q, n_k, n_new_k, n_sign, n_sale,
+             R_sale, B_avail, C_spend, B_rem, W_tot, W_rem, F_x, Q_bar, Q_bar_k,
+             q_perf_bar, q_pot_bar, Q0_bar, Q0_bar_k, Gamma, Gamma_pct,
+             B0_set, V, Status }
+
+END FUNCTION
